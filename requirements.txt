@@ -1,0 +1,13 @@
+git+https://github.com/huggingface/transformers.git@f1732e1374a082bf8e43bd0e4aa8a2da21a32a21
+git+https://github.com/huggingface/peft.git@c46d76ae3a323fa208bd777b9eb60a383e094d49
+git+https://github.com/lvwerra/trl.git@f3230902b18d265814b1def6213de30a0bece94b
+
+# extra libraries whose presence changes the functionality of the above libraries
+safetensors==0.3.1
+bitsandbytes==0.40.0.post4
+
+# transitive dependencies that the above libraries don't specify properly
+einops==0.6.1
+scipy==1.11.1
+sentencepiece==0.1.99
+protobuf==4.23.4
