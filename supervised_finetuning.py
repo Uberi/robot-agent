@@ -22,6 +22,12 @@ CONTEXT_WINDOW_SIZE = 2048  # size of individual dataset entries used when train
 TRAINING_STEPS = 4500  # number of steps to train for (since we're using gradient_accumulation_steps=4, the model will see TRAINING_STEPS * 4 * BATCH_SIZE samples throughout the entire training run)
 
 
+def prompt_formatter(example):
+    if example["input"]:
+        return f'Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.\n\n### Instruction:\n{example["instruction"]}\n\n### Input:\n{example["input"]}\n\n### Response:\n{example["output"]}'
+    return f'Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n### Instruction:\n{example["instruction"]}\n\n### Response:\n{example["output"]}'
+
+
 def create_datasets(tokenizer):
     # generate train/test split with 0.5% test
     with open(DATA_JSON_PATH) as f:
@@ -30,11 +36,6 @@ def create_datasets(tokenizer):
     test_dataset_size = round(len(dataset) * 0.005)
     train_dataset, test_dataset = dataset[test_dataset_size:], dataset[:test_dataset_size]
     print(f"train dataset size: {len(train_dataset)}, test dataset size: {len(test_dataset)}")
-
-    def prompt_formatter(example):
-        if example["input"]:
-            return f'Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.\n\n### Instruction:\n{data_point["instruction"]}\n\n### Input:\n{data_point["input"]}\n\n### Response:\n{example["output"]}'
-        return f'Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n### Instruction:\n{example["instruction"]}\n\n### Response:\n{example["output"]}'
 
     # estimate the average number of characters per token in the dataset using 400 samples
     total_characters, total_tokens = 0, 0
@@ -73,13 +74,14 @@ def run_training(train_dataset, test_dataset, resume_from_checkpoint):
         task_type=peft.TaskType.CAUSAL_LM,
     )
 
-    model = transformers.AutoModelForCausalLM.from_pretrained(MODEL_PATH, load_in_8bit=True, use_safetensors=True)  # load in 8-bit quantized mode
+    model = transformers.AutoModelForCausalLM.from_pretrained(MODEL_PATH, load_in_8bit=True, low_cpu_mem_usage=True, use_safetensors=True)  # load in 8-bit quantized mode
     model = peft.prepare_model_for_kbit_training(model)
     model = peft.get_peft_model(model, lora_config)
+    model.print_trainable_parameters()
     torch.cuda.empty_cache()  # helps reduce VRAM usage - it's right after the PEFT version of the model was created, so some old stuff is still around unnecessarily
 
     if resume_from_checkpoint is not None:
-        checkpoint_name = os.path.join(resume_from_checkpoint, "adapter_model.bin")
+        checkpoint_name = os.path.join(OUTPUT_DIRECTORY, resume_from_checkpoint, "adapter_model.bin")
         assert os.path.exists(checkpoint_name), checkpoint_name
         adapters_weights = torch.load(checkpoint_name)
         peft.set_peft_model_state_dict(model, adapters_weights)
@@ -89,19 +91,20 @@ def run_training(train_dataset, test_dataset, resume_from_checkpoint):
         args=transformers.TrainingArguments(
             output_dir=OUTPUT_DIRECTORY,
             dataloader_drop_last=True,  # when the dataset size isn't evenly divisible by the batch size, the remainder forms an incomplete batch - throw away this batch to avoid having to ever see an incomplete batch
-            evaluation_strategy="steps", eval_steps=300,  # run an evaluation every 500 training steps (~1 hour)
             max_steps=TRAINING_STEPS,  # perform a fixed number of training steps before stopping
-            save_strategy="steps", save_steps=300, save_safetensors=True,  # save a checkpoint every 500 training steps (~1 hour)
+            evaluation_strategy="steps", eval_steps=300,  # run an evaluation every 300 training steps (~1 hour)
+            save_strategy="steps", save_steps=300, save_safetensors=True,  # save a checkpoint every 300 training steps (~1 hour)
             logging_strategy="steps", logging_steps=1,  # log output every training step
             per_device_train_batch_size=BATCH_SIZE,  # batch size used in training
             per_device_eval_batch_size=BATCH_SIZE,  # batch size used in evaluation
             learning_rate=1e-5, warmup_steps=100,  # linearly ramp up the learning rate for the AdamW optimizer from 0 to 1e-5 over the first 100 steps, then keep it at 1e-5 afterwards
             gradient_accumulation_steps=4,  # use gradient accumulation to multiply effective batch size by 4 (without increasing VRAM usage by 4)
             gradient_checkpointing=True,  # use gradient checkpointing to decrease VRAM usage
-            fp16=True,  # use 16-bit floats for training instead of 32-bit in most operations (some are still kept in 32-bit for precision) to decrease VRAM usage and increase training performance, in practice the precision loss has a relatively small effect on the final result
-            tf32=True,  # in newer NVIDIA hardware, this replaces the remaining 32-bit operations with a 19-bit TensorFloat to increase training performance, in practice the precision loss has no noticeable effect on the final result
-            weight_decay=0.05,  # set the weight decay regularization factor of the  optimizer
+            bf16=True,  # use 16-bit bfloats for training instead of 32-bit floats in most operations (some are still kept in 32-bit for precision) to decrease VRAM usage and increase training performance, in practice the precision loss has a relatively small effect on the final result
+            tf32=True,  # in newer NVIDIA hardware, this replaces the remaining 32-bit operations with a 19-bit TensorFloat operations to increase training performance, in practice the precision loss has no noticeable effect on the final result
+            weight_decay=0.05,  # set the weight decay regularization factor of the optimizer
             run_name="llama-supervised-finetune",
+            # TODO: when Apex becomes more stable + easier to install, look into using adamw_apex_fused rather than adamw_hf for the optim= parameter
         ),
         train_dataset=train_dataset,
         eval_dataset=test_dataset,
@@ -109,23 +112,20 @@ def run_training(train_dataset, test_dataset, resume_from_checkpoint):
         callbacks=[trl.trainer.utils.PeftSavingCallback],
     )
 
-    trainable_params = sum(param.numel() for _, param in trainer.model.named_parameters() if param.requires_grad)
-    total_params = sum(param.numel() for _, param in trainer.model.named_parameters())
-    print(f"total params: {total_params}, trainable params: {trainable_params} ({100 * trainable_params / total_params}%)")
-
     os.makedirs(OUTPUT_DIRECTORY, exist_ok=True)
     trainer.train()
-    trainer.model.save_pretrained(os.path.join(OUTPUT_DIRECTORY, "final_checkpoint"), safe_serialization=True)
+    model.save_pretrained(os.path.join(OUTPUT_DIRECTORY, "final_checkpoint"), safe_serialization=True)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--resume_from_checkpoint", type=str, default=None)
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None, help=f"If specified, start the training from the specified checkpoint (e.g., checkpoint-500). You can get a list of all checkpoints by running: ls 
+    {OUTPUT_DIRECTORY}'")
     args = parser.parse_args()
 
     transformers.set_seed(RANDOMNESS_SEED)
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(MODEL_PATH, use_safetensors=True)
-    tokenizer.add_special_tokens({"pad_token": tokenizer.eos_token})  # the padding token isn't set in the included tokenizer by default (see tokenizer.special_tokens_map for existing special tokens), set it manually
+    tokenizer.pad_token = tokenizer.eos_token  # the padding token isn't set in the included tokenizer by default (see tokenizer.special_tokens_map for existing special tokens), set it manually
     train_dataset, test_dataset = create_datasets(tokenizer)
     run_training(train_dataset, test_dataset, args.resume_from_checkpoint)

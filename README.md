@@ -18,7 +18,7 @@ Technical details:
 * QLoRA training, a 128 rank LoRA similar to [Guanaco](https://github.com/artidoro/qlora/blob/cc488110b5ea23594a418daca7085000a9420625/qlora.py#L324).
 * Full 2048-token context window used in training.
 * Based on LLaMa 13B.
-* Codebase takes ideas and inspiration from [StackLLaMa](https://github.com/lvwerra/trl/tree/main/examples/stack_llama/scripts), [QLoRA](https://github.com/artidoro/qlora), and [LLaMa-TRL](https://github.com/jasonvanf/llama-trl).
+* Codebase takes ideas and inspiration from [StackLLaMa](https://github.com/lvwerra/trl/tree/5c7bfbc8d9aeabee893290cc02121d7260636978/examples/research_projects/stack_llama/scripts), [QLoRA](https://github.com/artidoro/qlora), and [LLaMa-TRL](https://github.com/jasonvanf/llama-trl).
 
 Prompt Format
 -------------
