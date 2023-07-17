@@ -15,7 +15,7 @@ import trl.trainer.utils
 
 DATA_JSON_PATH = "./huggingface_cache/datasets--c-s-ale--alpaca-gpt4-data/snapshots/88ef836e16a1d6c0658490cc521184c269c46449/data/alpaca_gpt4_data.json"  # downloaded by running `make download-datasets-and-models` in this repo
 MODEL_PATH = "./huggingface_cache/models--huggyllama--llama-13b/snapshots/bf57045473f207bb1de1ed035ace226f4d9f9bba/"  # downloaded by running `make download-datasets-and-models` in this repo
-OUTPUT_DIRECTORY = "./llama-supervised-finetune-output"
+OUTPUT_DIRECTORY = "./llama-supervised-finetuning-output"
 RANDOMNESS_SEED = 0
 BATCH_SIZE = 1  # number of samples seen per gradient update - to increase training speed, set this to the largest size that your hardware can support without running out of memory
 CONTEXT_WINDOW_SIZE = 2048  # size of individual dataset entries used when training the model - to improve performance on longer prompts, set this to the largest size that your hardware can support without running out of memory
@@ -66,28 +66,29 @@ def create_datasets(tokenizer):
     return train_dataset_packed, test_dataset_packed
 
 
-def run_training(train_dataset, test_dataset, resume_from_checkpoint):
+def run_training(train_dataset: torch.utils.data.IterableDataset, test_dataset: torch.utils.data.IterableDataset, resume_from_checkpoint: str):
     lora_config = peft.LoraConfig(
+        # by default, this adds LoRA adapters around LLaMa's "q_proj" and "v_proj", see https://github.com/huggingface/peft/blob/5a0e19dda1048ff8caaa12970ba7574f9cdfbf76/src/peft/utils/other.py#L280 for more details
         r=128,  # number of LoRA attention dimension parameters - directly proportional to LoRA adapter VRAM usage, set this to the largest value your hardware can support without running out of memory
         lora_alpha=16,  # alpha parameter for LoRA, essentially scales all of the LoRA weights, which determines "how much of an effect" this LoRA has on the final model
         lora_dropout=0.05,  # dropout probability for LoRA layers
         task_type=peft.TaskType.CAUSAL_LM,
     )
 
-    model = transformers.AutoModelForCausalLM.from_pretrained(MODEL_PATH, load_in_8bit=True, low_cpu_mem_usage=True, use_safetensors=True)  # load in 8-bit quantized mode
-    model = peft.prepare_model_for_kbit_training(model)
-    model = peft.get_peft_model(model, lora_config)
-    model.print_trainable_parameters()
+    base_model = transformers.AutoModelForCausalLM.from_pretrained(MODEL_PATH, load_in_8bit=True, low_cpu_mem_usage=True, use_safetensors=True)  # load in 8-bit quantized mode
+    peft.prepare_model_for_kbit_training(base_model)
+    peft_base_model = peft.get_peft_model(base_model, lora_config)
+    peft_base_model.print_trainable_parameters()
     torch.cuda.empty_cache()  # helps reduce VRAM usage - it's right after the PEFT version of the model was created, so some old stuff is still around unnecessarily
 
     if resume_from_checkpoint is not None:
         checkpoint_name = os.path.join(OUTPUT_DIRECTORY, resume_from_checkpoint, "adapter_model.bin")
         assert os.path.exists(checkpoint_name), checkpoint_name
         adapters_weights = torch.load(checkpoint_name)
-        peft.set_peft_model_state_dict(model, adapters_weights)
+        peft.set_peft_model_state_dict(peft_base_model, adapters_weights)
 
     trainer = transformers.Trainer(
-        model=model,
+        model=peft_base_model,
         args=transformers.TrainingArguments(
             output_dir=OUTPUT_DIRECTORY,
             dataloader_drop_last=True,  # when the dataset size isn't evenly divisible by the batch size, the remainder forms an incomplete batch - throw away this batch to avoid having to ever see an incomplete batch
@@ -103,7 +104,7 @@ def run_training(train_dataset, test_dataset, resume_from_checkpoint):
             bf16=True,  # use 16-bit bfloats for training instead of 32-bit floats in most operations (some are still kept in 32-bit for precision) to decrease VRAM usage and increase training performance, in practice the precision loss has a relatively small effect on the final result
             tf32=True,  # in newer NVIDIA hardware, this replaces the remaining 32-bit operations with a 19-bit TensorFloat operations to increase training performance, in practice the precision loss has no noticeable effect on the final result
             weight_decay=0.05,  # set the weight decay regularization factor of the optimizer
-            run_name="llama-supervised-finetune",
+            run_name="llama-supervised-finetuning",
             # TODO: when Apex becomes more stable + easier to install, look into using adamw_apex_fused rather than adamw_hf for the optim= parameter
         ),
         train_dataset=train_dataset,
@@ -114,13 +115,12 @@ def run_training(train_dataset, test_dataset, resume_from_checkpoint):
 
     os.makedirs(OUTPUT_DIRECTORY, exist_ok=True)
     trainer.train()
-    model.save_pretrained(os.path.join(OUTPUT_DIRECTORY, "final_checkpoint"), safe_serialization=True)
+    peft_base_model.save_pretrained(os.path.join(OUTPUT_DIRECTORY, "final_checkpoint"), safe_serialization=True)  # save LoRA by itself
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--resume_from_checkpoint", type=str, default=None, help=f"If specified, start the training from the specified checkpoint (e.g., checkpoint-500). You can get a list of all checkpoints by running: ls 
-    {OUTPUT_DIRECTORY}'")
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None, help=f"If specified, start the training from the specified checkpoint (e.g., checkpoint-500). You can get a list of all checkpoints by running: ls {OUTPUT_DIRECTORY}'")
     args = parser.parse_args()
 
     transformers.set_seed(RANDOMNESS_SEED)
