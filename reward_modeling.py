@@ -7,14 +7,14 @@ os.environ['HF_DATASETS_OFFLINE'] = '1'  # ask datasets library not to make arbi
 os.environ['TRANSFORMERS_OFFLINE'] = '1'  # ask transformer library not to make arbitrary web requests
 os.environ['BITSANDBYTES_NOWELCOME'] = '1'  # disable welcome message that bitsandbytes prints, it's unnecessary noise
 
-import numpy as np
 import torch
 import peft
 import transformers
+import trl
 
 
 DATA_JSON_PATH = "./huggingface_cache/gpt-4-llm-comparison_data_v2.json"  # downloaded by running `make download-datasets-and-models` in this repo
-MODEL_PATH = "./llama-supervised-finetuning-output/final_checkpoint_merged"  # generated as the output of running `make train-supervised-finetuning`
+BASE_MODEL_PATH = "./llama-supervised-finetuning-output/final_checkpoint_merged"  # generated as the output of running `make train-supervised-finetuning`
 OUTPUT_DIRECTORY = "./llama-reward-model-output"
 RANDOMNESS_SEED = 0
 BATCH_SIZE = 1  # number of samples seen per gradient update - to increase training speed, set this to the largest size that your hardware can support without running out of memory
@@ -58,7 +58,7 @@ def create_datasets(tokenizer):
         better_tokenized, worse_tokenized = tokenizer(better_prompt), tokenizer(worse_prompt)
         if len(better_tokenized["input_ids"]) > CONTEXT_WINDOW_SIZE or len(worse_tokenized["input_ids"]) > CONTEXT_WINDOW_SIZE:  # tokenized question-answer pair too long, skip this one
             continue
-        processed_dataset.append({"better_input_ids": better_tokenized["input_ids"], "better_attention_mask": better_tokenized["attention_mask"], "worse_input_ids": worse_tokenized["input_ids"], "worse_attention_mask": worse_tokenized["attention_mask"]})  # store tokens (as a list of ints) and attention masks (list of bool-ints masking off token attention; usually used to mask off padding tokens so we don't do attention on them)
+        processed_dataset.append({"input_ids_chosen": better_tokenized["input_ids"], "attention_mask_chosen": better_tokenized["attention_mask"], "input_ids_rejected": worse_tokenized["input_ids"], "attention_mask_rejected": worse_tokenized["attention_mask"]})  # store tokens (as a list of ints) and attention masks (list of bool-ints masking off token attention; usually used to mask off padding tokens so we don't do attention on them)
     random.shuffle(processed_dataset)
 
     # generate train/test split with 1% test
@@ -68,60 +68,48 @@ def create_datasets(tokenizer):
     return Dataset(train_dataset), Dataset(test_dataset)
 
 
-class RewardTrainer(transformers.Trainer):
-    def compute_loss(self, model, batch, return_outputs=False):
-        better_rewards = model(input_ids=batch["better_input_ids"], attention_mask=batch["better_attention_mask"])[0]
-        worse_rewards = model(input_ids=batch["worse_input_ids"], attention_mask=batch["worse_attention_mask"])[0]
-        loss = -torch.nn.functional.logsigmoid(better_rewards - worse_rewards).mean()  # pairwise logloss as defined in [the InstructGPT/RLHF paper](https://arxiv.org/abs/2203.02155)
-        return (loss, (loss, better_rewards, worse_rewards)) if return_outputs else loss  # when return_outputs is true, the outputs format should either be a dict (in which case the values get turned into an array in insertion order, very unusual design decision), or a list/tuple (in which case the first element gets trimmed off, presumably because the library assumes that the first element is the loss and the rest of the parameters are the logits), see https://github.com/huggingface/transformers/blob/5bb4430edc7df9f9950d412d98bbe505cc4d328b/src/transformers/trainer.py#L3343 for details
-
-
-def run_training(train_dataset: torch.utils.data.IterableDataset, test_dataset: torch.utils.data.IterableDataset, resume_from_checkpoint: str):
-    peft_config = peft.LoraConfig(
-        r=8,  # number of LoRA attention dimension parameters - directly proportional to LoRA adapter VRAM usage, set this to the largest value your hardware can support without running out of memory
-        lora_alpha=32,  # alpha parameter for LoRA, essentially scales all of the LoRA weights, which determines "how much of an effect" this LoRA has on the final model
-        lora_dropout=0.1,  # dropout probability for LoRA layers
-        task_type=peft.TaskType.SEQ_CLS,
-    )
-
-    base_model = transformers.AutoModelForSequenceClassification.from_pretrained(MODEL_PATH, load_in_8bit=True, num_labels=1, low_cpu_mem_usage=True, use_safetensors=True)  # when num_labels=1, the output of this model is the model's regression loss (mean-square loss) for any given input
+def run_training(train_dataset: torch.utils.data.IterableDataset, test_dataset: torch.utils.data.IterableDataset, tokenizer, resume_from_checkpoint: str):
+    base_model = transformers.AutoModelForSequenceClassification.from_pretrained(BASE_MODEL_PATH, load_in_8bit=True, num_labels=1, low_cpu_mem_usage=True, use_safetensors=True)  # when num_labels=1, the output of this model is the model's regression loss (mean-square loss) for any given input
     peft.prepare_model_for_kbit_training(base_model)
-    peft_base_model = peft.get_peft_model(base_model, peft_config)
-    peft_base_model.print_trainable_parameters()
-    torch.cuda.empty_cache()  # helps reduce VRAM usage - it's right after the PEFT version of the model was created, so some old stuff is still around unnecessarily
 
     if resume_from_checkpoint is not None:
-        checkpoint_name = os.path.join(OUTPUT_DIRECTORY, resume_from_checkpoint, "adapter_model.bin")
+        checkpoint_name = os.path.join(OUTPUT_DIRECTORY, resume_from_checkpoint)
         assert os.path.exists(checkpoint_name), checkpoint_name
-        adapters_weights = torch.load(checkpoint_name)
-        peft.set_peft_model_state_dict(peft_base_model, adapters_weights)
-
-    def compute_metrics(eval_prediction):
-        better_rewards, worse_rewards = eval_prediction.predictions  # this is actually the logits, namely the second return value of RewardTrainer.compute_loss(..., return_outputs=True) with its first element removed, see https://github.com/huggingface/transformers/blob/5bb4430edc7df9f9950d412d98bbe505cc4d328b/src/transformers/trainer.py#L3727 for details
-        return {"accuracy": np.sum(better_rewards > worse_rewards) / len(better_rewards)}  # the accuracy metric is how often the model predicts a higher reward for the "better" response than for the "worse" response, randomly choosing would give 50%, and perfectly choosing would give 100%
+        peft_base_model = peft.PeftModel.from_pretrained(base_model, checkpoint_name, is_trainable=True)  # TODO: is there a way to make this error out if it isn't in safetensors format?
+    else:
+        peft_base_model = peft.get_peft_model(base_model, peft.LoraConfig(
+            # by default, this adds LoRA adapters around LLaMa's "q_proj" and "v_proj", see https://github.com/huggingface/peft/blob/5a0e19dda1048ff8caaa12970ba7574f9cdfbf76/src/peft/utils/other.py#L280 for more details
+            r=8,  # number of LoRA attention dimension parameters - directly proportional to LoRA adapter VRAM usage, set this to the largest value your hardware can support without running out of memory
+            lora_alpha=32,  # alpha parameter for LoRA, essentially scales all of the LoRA weights, which determines "how much of an effect" this LoRA has on the final model
+            lora_dropout=0.1,  # dropout probability for LoRA layers
+            task_type=peft.TaskType.SEQ_CLS,
+            # TODO: should we target more lora modules with target_modules=[...]? Guanaco does it on every linear layer (except the head): https://github.com/artidoro/qlora/blob/845188de110d8eb7c95cc8907b54d8cb2e7c01bd/qlora.py#L221
+        ))
+    peft_base_model.print_trainable_parameters()
+    torch.cuda.empty_cache()  # helps reduce VRAM usage - it's right after the PEFT version of the model was created, so some old stuff is still around unnecessarily
 
     def build_batch_from_dataset_subset(dataset_subset):
         # pad all of the better and worse examples in this subset of the dataset up to the longest example's length, and turn them into one PyTorch tensor for the better examples, and another for the worse
         # see https://huggingface.co/docs/transformers/v4.30.0/en/pad_truncation#padding-and-truncation and https://github.com/huggingface/transformers/blob/5bb4430edc7df9f9950d412d98bbe505cc4d328b/src/transformers/tokenization_utils_base.py#L2907 for more details
         better_examples = tokenizer.pad(
-            [{"input_ids": example["better_input_ids"], "attention_mask": example["better_attention_mask"]} for example in dataset_subset],
+            [{"input_ids": example["input_ids_chosen"], "attention_mask": example["attention_mask_chosen"]} for example in dataset_subset],
             padding='longest',
             return_tensors="pt",  # return result as a PyTorch tensor
         )
         worse_examples = tokenizer.pad(
-            [{"input_ids": example["worse_input_ids"], "attention_mask": example["worse_attention_mask"]} for example in dataset_subset],
+            [{"input_ids": example["input_ids_rejected"], "attention_mask": example["attention_mask_rejected"]} for example in dataset_subset],
             padding='longest',
             return_tensors="pt",  # return result as a PyTorch tensor
         )
         return {
-            "better_input_ids": better_examples["input_ids"],
-            "better_attention_mask": better_examples["attention_mask"],
-            "worse_input_ids": worse_examples["input_ids"],
-            "worse_attention_mask": worse_examples["attention_mask"],
+            "input_ids_chosen": better_examples["input_ids"],
+            "attention_mask_chosen": better_examples["attention_mask"],
+            "input_ids_rejected": worse_examples["input_ids"],
+            "attention_mask_rejected": worse_examples["attention_mask"],
             "dummy_label": torch.tensor([0]),  # unnecessary label since there's only one label actually, but if not present then trainer.prediction_step() will think there are no labels and won't actually call trainer.compute_loss(), it's a dirty hack to get around all the reflection and "magic" functionality in this library; also, because of a recent bug introduced, the value has to be a torch.Tensor: https://github.com/huggingface/accelerate/issues/1611
         }
 
-    trainer = RewardTrainer(
+    trainer = trl.RewardTrainer(
         model=peft_base_model,
         args=transformers.TrainingArguments(
             output_dir=OUTPUT_DIRECTORY,
@@ -132,20 +120,19 @@ def run_training(train_dataset: torch.utils.data.IterableDataset, test_dataset: 
             logging_strategy="steps", logging_steps=1,  # log output every training step
             per_device_train_batch_size=BATCH_SIZE,  # batch size used in training
             per_device_eval_batch_size=BATCH_SIZE,  # batch size used in evaluation
-            learning_rate=1e-5, warmup_steps=100,  # linearly ramp up the learning rate for the AdamW optimizer from 0 to 1e-5 over the first 100 steps, then keep it at 1e-5 afterwards
+            learning_rate=2e-5,  # initial learning rate of 2e-5 for the AdamW optimizer
             gradient_accumulation_steps=4,  # use gradient accumulation to multiply effective batch size by 4 (without increasing VRAM usage by 4)
             gradient_checkpointing=True,  # use gradient checkpointing to decrease VRAM usage
             bf16=True,  # use 16-bit bfloats for training instead of 32-bit floats in most operations (some are still kept in 32-bit for precision) to decrease VRAM usage and increase training performance, in practice the precision loss has a relatively small effect on the final result
             tf32=True,  # in newer NVIDIA hardware, this replaces the remaining 32-bit operations with a 19-bit TensorFloat operations to increase training performance, in practice the precision loss has no noticeable effect on the final result
             weight_decay=0.001,
             run_name="llama-reward-model",
-            remove_unused_columns=False,  # by default, the transformers library removes any column from the dataset that doesn't match a name that's a parameter name of the .forward() method of the model, we don't want that because our dataset has other important fields like "better_input_ids"
+            remove_unused_columns=False,  # by default, the transformers library removes any column from the dataset that doesn't match a name that's a parameter name of the .forward() method of the model, we don't want that because our dataset has other important fields like "input_ids_chosen"
             label_names=["dummy_label"],  # by default, label names for sequence classification models are taken from the parameter names in the .forward() method of the model containing "label" (see https://github.com/huggingface/transformers/blob/5bb4430edc7df9f9950d412d98bbe505cc4d328b/src/transformers/trainer.py#L687 for details), which is meaningless here, so even though there's only one label we still have to set one
             # TODO: when Apex becomes more stable + easier to install, look into using adamw_apex_fused rather than adamw_hf for the optim= parameter
         ),
         train_dataset=train_dataset,
         eval_dataset=test_dataset,
-        compute_metrics=compute_metrics,
         data_collator=build_batch_from_dataset_subset,
     )
 
@@ -163,7 +150,7 @@ if __name__ == "__main__":
 
     transformers.set_seed(RANDOMNESS_SEED)
 
-    tokenizer = transformers.AutoTokenizer.from_pretrained(MODEL_PATH, use_safetensors=True)
+    tokenizer = transformers.AutoTokenizer.from_pretrained(BASE_MODEL_PATH, use_safetensors=True)
     tokenizer.pad_token = tokenizer.eos_token  # the padding token isn't set in the included tokenizer by default (see tokenizer.special_tokens_map for existing special tokens), set it manually
     train_dataset, test_dataset = create_datasets(tokenizer)
-    run_training(train_dataset, test_dataset, args.resume_from_checkpoint)
+    run_training(train_dataset, test_dataset, tokenizer, args.resume_from_checkpoint)

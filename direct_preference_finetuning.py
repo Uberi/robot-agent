@@ -1,72 +1,58 @@
 import argparse
 import os
+import re
 import json
-import random
+import gzip
+from collections import defaultdict
 
 os.environ['HF_DATASETS_OFFLINE'] = '1'  # ask datasets library not to make arbitrary web requests
 os.environ['TRANSFORMERS_OFFLINE'] = '1'  # ask transformer library not to make arbitrary web requests
 os.environ['BITSANDBYTES_NOWELCOME'] = '1'  # disable welcome message that bitsandbytes prints, it's unnecessary noise
 
+import numpy as np
 import torch
 import peft
 import transformers
-import trl.trainer.utils
+import trl
 
 
-DATA_JSON_PATH = "./huggingface_cache/datasets--c-s-ale--alpaca-gpt4-data/snapshots/88ef836e16a1d6c0658490cc521184c269c46449/data/alpaca_gpt4_data.json"  # downloaded by running `make download-datasets-and-models` in this repo
-BASE_MODEL_PATH = "./huggingface_cache/models--huggyllama--llama-13b/snapshots/bf57045473f207bb1de1ed035ace226f4d9f9bba/"  # downloaded by running `make download-datasets-and-models` in this repo
-OUTPUT_DIRECTORY = "./llama-supervised-finetuning-output"
+DATA_JSON_FILES_PATH = "./huggingface_cache/datasets--Anthropic--hh-rlhf/snapshots/09be8c5bbc57cb3887f3a9732ad6aa7ec602a1fa/helpful-online/"  # downloaded by running `make download-datasets-and-models` in this repo
+BASE_MODEL_PATH = "./llama-supervised-finetuning-output/final_checkpoint_merged"  # generated as the output of running `make train-supervised-finetuning`
+OUTPUT_DIRECTORY = "./llama-direct-preference-finetuning-output"
 RANDOMNESS_SEED = 0
 BATCH_SIZE = 1  # number of samples seen per gradient update - to increase training speed, set this to the largest size that your hardware can support without running out of memory
-CONTEXT_WINDOW_SIZE = 2048  # size of individual dataset entries used when training the model - to improve performance on longer prompts, set this to the largest size that your hardware can support without running out of memory
-TRAINING_STEPS = 4500  # number of steps to train for (since we're using gradient_accumulation_steps=4, the model will see TRAINING_STEPS * 4 * BATCH_SIZE samples throughout the entire training run)
+CONTEXT_WINDOW_SIZE = 2048  # maximum length of any input to the model, used to filter out too-long data points - set this to the same value as the corresponding CONTEXT_WINDOW_SIZE variable in supervised_finetuning.py TODO
+TRAINING_STEPS = 1000  # number of steps to train for (since we're using gradient_accumulation_steps=4, the model will see TRAINING_STEPS * 4 * BATCH_SIZE samples throughout the entire training run)
 
 
 def prompt_formatter(example):
-    if example["input"]:
-        return f'Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.\n\n### Instruction:\n{example["instruction"]}\n\n### Input:\n{example["input"]}\n\n### Response:\n{example["output"]}'
-    return f'Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n### Instruction:\n{example["instruction"]}\n\n### Response:\n{example["output"]}'
+    chosen_prompt_so_far = "Below is an instruction that describes a task. Write a response that appropriately completes the request."
+    chosen_messages, rejected_messages = re.split(r"\n\n(Human|Assistant): ", example["chosen"])[1:], re.split(r"\n\n(Human|Assistant): ", example["rejected"])[1:]
+    previous_human_is_speaking = False
+    for i in range(0, min(len(chosen_messages), len(rejected_messages)), 2):
+        assert chosen_messages[i] == rejected_messages[i] and chosen_messages[i] in ["Human", "Assistant"], example
+        human_is_speaking = chosen_messages[i] == "Human"
+        if human_is_speaking == previous_human_is_speaking:
+            break
+        previous_human_is_speaking = human_is_speaking
+
+        if human_is_speaking:
+            assert chosen_messages[i + 1] == rejected_messages[i + 1], example
+            chosen_prompt_so_far += f'\n\n### Instruction:\n{chosen_messages[i + 1]}\n\n### Response:\n'
+        else:
+            yield {"prompt": chosen_prompt_so_far, "responses": [chosen_messages[i + 1], rejected_messages[i + 1]], "pairs": [(0, 1)]}
+            chosen_prompt_so_far += chosen_messages[i + 1]
 
 
 def create_datasets(tokenizer):
-    # generate train/test split with 0.5% test
-    with open(DATA_JSON_PATH) as f:
-        dataset = json.load(f)
-    random.shuffle(dataset)
-    test_dataset_size = round(len(dataset) * 0.005)
-    train_dataset, test_dataset = dataset[test_dataset_size:], dataset[:test_dataset_size]
-    print(f"train dataset size: {len(train_dataset)}, test dataset size: {len(test_dataset)}")
-
-    # estimate the average number of characters per token in the dataset using 400 samples
-    total_characters, total_tokens = 0, 0
-    for _, example in zip(range(400), train_dataset):
-        text = prompt_formatter(example)
-        total_characters += len(text)
-        total_tokens += len(tokenizer(text).tokens())
-    estimated_chars_per_token = total_characters / total_tokens
-    print(f"dataset character to token ratio: {estimated_chars_per_token}")
-
-    # pack multiple short examples into a single CONTEXT_WINDOW_SIZE-token-long input sequence, rather than training on each short example individually - improves training efficiency (this technique is known as "example packing")
-    train_dataset_packed = trl.trainer.utils.ConstantLengthDataset(
-        tokenizer,
-        train_dataset,
-        formatting_func=prompt_formatter,
-        seq_length=CONTEXT_WINDOW_SIZE,
-        chars_per_token=estimated_chars_per_token,
-    )
-    test_dataset_packed = trl.trainer.utils.ConstantLengthDataset(
-        tokenizer,
-        test_dataset,
-        formatting_func=prompt_formatter,
-        seq_length=CONTEXT_WINDOW_SIZE,
-        chars_per_token=estimated_chars_per_token,
-    )
-    print(f"packed train dataset size: {sum(1 for _ in train_dataset_packed)}, packed test dataset size: {sum(1 for _ in test_dataset_packed)}")
-    train_dataset_packed.infinite = True  # generate unlimited sequences by repeatedly going through the dataset
-    return train_dataset_packed, test_dataset_packed
+    with gzip.open(os.path.join(DATA_JSON_FILES_PATH, "train.jsonl.gz"), mode="rt") as f:
+        train_dataset = [example for line in f for example in prompt_formatter(json.loads(line))]
+    with gzip.open(os.path.join(DATA_JSON_FILES_PATH, "test.jsonl.gz"), mode="rt") as f:
+        test_dataset = [example for line in f for example in prompt_formatter(json.loads(line))]
+    return train_dataset, test_dataset
 
 
-def run_training(train_dataset: torch.utils.data.IterableDataset, test_dataset: torch.utils.data.IterableDataset, resume_from_checkpoint: str):
+def run_training(train_dataset, test_dataset, tokenizer, resume_from_checkpoint):
     base_model = transformers.AutoModelForCausalLM.from_pretrained(BASE_MODEL_PATH, load_in_8bit=True, low_cpu_mem_usage=True, use_safetensors=True)  # load in 8-bit quantized mode
     peft.prepare_model_for_kbit_training(base_model)
     if resume_from_checkpoint is not None:
@@ -85,30 +71,34 @@ def run_training(train_dataset: torch.utils.data.IterableDataset, test_dataset: 
     peft_base_model.print_trainable_parameters()
     torch.cuda.empty_cache()  # helps reduce VRAM usage - it's right after the PEFT version of the model was created, so some old stuff is still around unnecessarily
 
-    trainer = transformers.Trainer(
-        model=peft_base_model,
+    trainer = trl.DPOTrainer(
+        peft_base_model,
+        base_model,  # use the original base model for comparison purposes (this model will be used in evaluation/inference mode, as a reference)
         args=transformers.TrainingArguments(
             output_dir=OUTPUT_DIRECTORY,
             dataloader_drop_last=True,  # when the dataset size isn't evenly divisible by the batch size, the remainder forms an incomplete batch - throw away this batch to avoid having to ever see an incomplete batch
             max_steps=TRAINING_STEPS,  # perform a fixed number of training steps before stopping
-            evaluation_strategy="steps", eval_steps=300,  # run an evaluation every 300 training steps (~1 hour)
-            save_strategy="steps", save_steps=300, save_safetensors=True,  # save a checkpoint every 300 training steps (~1 hour)
+            evaluation_strategy="steps", eval_steps=1,  # run an evaluation every 200 training steps (~1 hour)
+            save_strategy="steps", save_steps=200, save_safetensors=True,  # save a checkpoint every 200 training steps (~1 hour)
             logging_strategy="steps", logging_steps=1,  # log output every training step
-            per_device_train_batch_size=BATCH_SIZE,  # batch size used in training
-            per_device_eval_batch_size=BATCH_SIZE,  # batch size used in evaluation
-            learning_rate=1e-5, warmup_steps=100,  # linearly ramp up the learning rate for the AdamW optimizer from 0 to 1e-5 over the first 100 steps, then keep it at 1e-5 afterwards
-            gradient_accumulation_steps=4,  # use gradient accumulation to multiply effective batch size by 4 (without increasing VRAM usage by 4)
+            per_device_train_batch_size=BATCH_SIZE,
+            per_device_eval_batch_size=BATCH_SIZE,
+            learning_rate=1e-5, warmup_steps=150,  # linearly ramp up the learning rate for the AdamW optimizer from 0 to 1e-5 over the first 150 steps, then keep it at 1e-5 afterwards
+            gradient_accumulation_steps=16,
             gradient_checkpointing=True,  # use gradient checkpointing to decrease VRAM usage
             bf16=True,  # use 16-bit bfloats for training instead of 32-bit floats in most operations (some are still kept in 32-bit for precision) to decrease VRAM usage and increase training performance, in practice the precision loss has a relatively small effect on the final result
             tf32=True,  # in newer NVIDIA hardware, this replaces the remaining 32-bit operations with a 19-bit TensorFloat operations to increase training performance, in practice the precision loss has no noticeable effect on the final result
-            weight_decay=0.05,  # set the weight decay regularization factor of the optimizer
-            run_name="llama-supervised-finetuning",
-            # TODO: when Apex becomes more stable + easier to install, look into using adamw_apex_fused rather than adamw_hf for the optim= parameter
+            run_name="llama-direct-preference-finetuning",
+            # TODO: when Apex becomes more stable + easier to install, look into using adamw_apex_fused rather than adamw_hf for the optim= parameter as well as for the optimizer settings on the DPOTrainer, is the optim= setting even used here?
         ),
+        beta=0.1,  # parameter controlling the deviation from the reference model, higher values prevent the model from deviating too far from the reference model, 0.1 is a relatively low value so the model will change quite a bit
         train_dataset=train_dataset,
         eval_dataset=test_dataset,
         tokenizer=tokenizer,
-        callbacks=[trl.trainer.utils.PeftSavingCallback],
+        label_pad_token_id=-100,  # TODO: explain what this means
+        padding_value=0,  # TODO: explain what this means
+        max_length=512,  # TODO: explain what this means
+        max_prompt_length=128,  # TODO: explain what this means
     )
 
     os.makedirs(OUTPUT_DIRECTORY, exist_ok=True)
@@ -126,4 +116,4 @@ if __name__ == "__main__":
     tokenizer = transformers.AutoTokenizer.from_pretrained(BASE_MODEL_PATH, use_safetensors=True)
     tokenizer.pad_token = tokenizer.eos_token  # the padding token isn't set in the included tokenizer by default (see tokenizer.special_tokens_map for existing special tokens), set it manually
     train_dataset, test_dataset = create_datasets(tokenizer)
-    run_training(train_dataset, test_dataset, args.resume_from_checkpoint)
+    run_training(train_dataset, test_dataset, tokenizer, args.resume_from_checkpoint)

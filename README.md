@@ -3,7 +3,7 @@ Robot Agent
 
 Fine-tuned 13B LLaMa model designed for ReAct-style and Tree-Of-Thoughts style prompting. The codebase has the following desirable features:
 
-* Entire training procedure runs out of the box on a single RTX 4090 with less than 60 hours of compute time. TODO: get more detailed info, seems to vary
+* Entire training procedure runs out of the box on a single RTX 4090 with less than 30 hours of compute time.
     * Requires 22.7GiB of the available 24GiB of VRAM.
     * This is accomplished through tuning, quantization, FP16, TF32, and the usual gradient accumulation/checkpointing settings.
     * Training is fully interruptible - will automatically resume from latest checkpoint.
