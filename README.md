@@ -1,7 +1,7 @@
 Robot Agent
 ===========
 
-Fine-tuned 13B Llama model designed for ReAct-style and Tree-Of-Thoughts style prompting. The codebase has the following desirable features:
+Fine-tuned Llama2 13B model designed for ReAct-style and Tree-Of-Thoughts style prompting. The codebase has the following desirable features:
 
 * Entire training procedure runs out of the box on a single computer with 64GB of RAM and 24GB of VRAM (i.e. consumer-grade graphics cards such as the RTX 3090 and RTX 4090) with less than 30 hours of compute time.
     * Carefully tuned to use no more than 23.6GiB of VRAM.
