@@ -41,6 +41,7 @@ llama2-direct-preference-finetuning-output/final_checkpoint_merged: venv/require
 
 venv/requirements_installed: requirements.txt
 	python3 -m venv venv
+	. ./venv/bin/activate && pip install setuptools==68.0.0 && pip install torch==2.0.1 --index-url https://download.pytorch.org/whl/cu118  # install the CUDA 11.8 version of PyTorch rather than the default CUDA 11.7 version for a nice 50% GPU performance bump, currently the PyTorch install page (https://pytorch.org/get-started/locally/) shows "pip install torch" under the CUDA 11.7 section, whereas the CUDA 11.8 section shows the different command we're using here. because it's using a different Python package index, we also can't put this in the requirements.txt file either
 	. ./venv/bin/activate && pip install -r requirements.txt && touch ./venv/requirements_installed
 
 llama.cpp/main:

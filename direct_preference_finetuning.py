@@ -26,22 +26,22 @@ TRAINING_STEPS = 1000  # number of steps to train for (since we're using gradien
 
 
 def prompt_formatter(example):
-    chosen_prompt_so_far = "Below is an instruction that describes a task. Write a response that appropriately completes the request."
     chosen_messages, rejected_messages = re.split(r"\n\n(Human|Assistant): ", example["chosen"])[1:], re.split(r"\n\n(Human|Assistant): ", example["rejected"])[1:]
-    previous_human_is_speaking = False
-    for i in range(0, min(len(chosen_messages), len(rejected_messages)), 2):
-        assert chosen_messages[i] == rejected_messages[i] and chosen_messages[i] in ["Human", "Assistant"], example
-        human_is_speaking = chosen_messages[i] == "Human"
-        if human_is_speaking == previous_human_is_speaking:
-            break
-        previous_human_is_speaking = human_is_speaking
-
-        if human_is_speaking:
-            assert chosen_messages[i + 1] == rejected_messages[i + 1], example
-            chosen_prompt_so_far += f'\n\n### Instruction:\n{chosen_messages[i + 1]}\n\n### Response:\n'
-        else:
-            yield {"prompt": chosen_prompt_so_far, "responses": [chosen_messages[i + 1], rejected_messages[i + 1]], "pairs": [(0, 1)]}
-            chosen_prompt_so_far += chosen_messages[i + 1]
+    chosen_prompt_so_far = ""
+    if len(chosen_messages) != len(rejected_messages) or len(chosen_messages) % 4 != 0:
+        return []
+    result = []
+    for i in range(0, min(len(chosen_messages), len(rejected_messages)), 4):
+        if not (chosen_messages[i] == rejected_messages[i] == "Human"):
+            return []
+        if not (chosen_messages[i + 2] == rejected_messages[i + 2] == "Assistant"):
+            return []
+        prompt, chosen, rejected = chosen_messages[i + 1], chosen_messages[i + 3], rejected_messages[i + 3]
+        chosen_prompt_so_far += f'\n\n### Human:\n{prompt}\n\n### Assistant:\n'
+        result.append({"prompt": chosen_prompt_so_far, "chosen": chosen, "rejected": rejected})
+        chosen_prompt_so_far += chosen_messages[i + 1]
+    assert not human_is_speaking, example
+    return result
 
 
 def create_datasets(tokenizer):
@@ -78,7 +78,7 @@ def run_training(train_dataset, test_dataset, tokenizer, resume_from_checkpoint)
             output_dir=OUTPUT_DIRECTORY,
             dataloader_drop_last=True,  # when the dataset size isn't evenly divisible by the batch size, the remainder forms an incomplete batch - throw away this batch to avoid having to ever see an incomplete batch
             max_steps=TRAINING_STEPS,  # perform a fixed number of training steps before stopping
-            evaluation_strategy="steps", eval_steps=1,  # run an evaluation every 200 training steps (~1 hour)
+            evaluation_strategy="steps", eval_steps=200,  # run an evaluation every 200 training steps (~1 hour)
             save_strategy="steps", save_steps=200, save_safetensors=True,  # save a checkpoint every 200 training steps (~1 hour)
             logging_strategy="steps", logging_steps=1,  # log output every training step
             per_device_train_batch_size=BATCH_SIZE,
