@@ -22,12 +22,9 @@ chat: train-direct-preference-finetuning
 	. ./venv/bin/activate && python3 chat.py
 
 .PHONY: generate-ggml
-generate-ggml: train-direct-preference-finetuning
-	# TODO: download llama.cpp and build it
-	mkdir -p exported-models
-	. ./venv/bin/activate && cd llama.cpp && python3 convert.py --outfile ../exported-models/ggml-robot-agent-f16.bin ../llama2-direct-preference-finetuning-output/final_checkpoint_merged && ./quantize ../exported-models/ggml-robot-agent-f16.bin ../exported-models/ggml-robot-agent-q5_K_M.bin q5_K_M
+generate-ggml: exported-models/ggml-robot-agent-q5_K_M.bin
 
-llama-cpp-chat:
+chat-llama-cpp: exported-models/ggml-robot-agent-q5_K_M.bin llama.cpp/main
 	cd llama.cpp && ./main --model ../exported-models/ggml-robot-agent-q5_K_M.bin --color -i --interactive-first --mirostat 2 --ctx-size 2048 -r $$'\n\n### Human:\n' --in-prefix $$'\n\n### Human:\n' --in-suffix $$'\n\n### Assistant:\n' -n -1
 
 ####################
@@ -45,3 +42,12 @@ llama2-direct-preference-finetuning-output/final_checkpoint_merged: venv/require
 venv/requirements_installed: requirements.txt
 	python3 -m venv venv
 	. ./venv/bin/activate && pip install -r requirements.txt && touch ./venv/requirements_installed
+
+llama.cpp/main:
+	[ ! -d llama.cpp/.git ] && git clone https://github.com/ggerganov/llama.cpp.git
+	cd llama.cpp && git reset --hard d01bccde9f759b24449fdaa16306b406a50eb367 && make
+
+exported-models/ggml-robot-agent-q5_K_M.bin: llama2-direct-preference-finetuning-output/final_checkpoint_merged llama.cpp/main
+	mkdir -p exported-models
+	. ./venv/bin/activate && python3 llama.cpp/convert.py --outfile exported-models/ggml-robot-agent-f16.bin llama2-direct-preference-finetuning-output/final_checkpoint_merged
+	./llama.cpp/quantize exported-models/ggml-robot-agent-f16.bin exported-models/ggml-robot-agent-q5_K_M.bin q5_K_M

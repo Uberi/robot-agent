@@ -76,7 +76,13 @@ First, run the following command to create `./exported-models/ggml-robot-agent-q
 make generate-ggml
 ```
 
-Now, navigate to your llama.cpp folder and start using the model with the following command (replace `PATH_TO_PROJECT_FOLDER` with the path to the current project folder):
+Now to load the model using Llama.cpp:
+
+```sh
+make chat-llama-cpp
+```
+
+To use Llama.cpp manually, navigate to your llama.cpp folder and start using the model with the following command (replace `PATH_TO_PROJECT_FOLDER` with the path to the current project folder):
 
 ```sh
 ./main --model PATH_TO_PROJECT_FOLDER/exported-models/ggml-robot-agent-q5_K_M.bin --color --interactive --interactive-first --mirostat 2 --ctx-size 2048 --reverse-prompt $'\n\n### Human:\n' --prompt $'\n\n### Human:\n' --in-suffix $'\n### Assistant:\n'
