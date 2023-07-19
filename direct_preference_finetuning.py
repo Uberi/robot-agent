@@ -17,11 +17,11 @@ import trl
 
 
 DATA_JSON_FILES_PATH = "./huggingface_cache/datasets--Anthropic--hh-rlhf/snapshots/09be8c5bbc57cb3887f3a9732ad6aa7ec602a1fa/helpful-online/"  # downloaded by running `make download-datasets-and-models` in this repo
-BASE_MODEL_PATH = "./llama-supervised-finetuning-output/final_checkpoint_merged"  # generated as the output of running `make train-supervised-finetuning`
-OUTPUT_DIRECTORY = "./llama-direct-preference-finetuning-output"
+BASE_MODEL_PATH = "./llama2-supervised-finetuning-output/final_checkpoint_merged"  # generated as the output of running `make train-supervised-finetuning`
+OUTPUT_DIRECTORY = "./llama2-direct-preference-finetuning-output"
 RANDOMNESS_SEED = 0
 BATCH_SIZE = 1  # number of samples seen per gradient update - to increase training speed, set this to the largest size that your hardware can support without running out of memory
-CONTEXT_WINDOW_SIZE = 2048  # maximum length of any input to the model, used to filter out too-long data points - set this to the same value as the corresponding CONTEXT_WINDOW_SIZE variable in supervised_finetuning.py TODO
+CONTEXT_WINDOW_SIZE = 1536  # maximum length of any input to the model, used to filter out too-long data points (this doesn't have to be the same value as in supervised_finetuning.py) - to improve performance on longer prompts, set this to the largest size that your hardware can support without running out of memory
 TRAINING_STEPS = 1000  # number of steps to train for (since we're using gradient_accumulation_steps=4, the model will see TRAINING_STEPS * 4 * BATCH_SIZE samples throughout the entire training run)
 
 
@@ -61,12 +61,12 @@ def run_training(train_dataset, test_dataset, tokenizer, resume_from_checkpoint)
         peft_base_model = peft.PeftModel.from_pretrained(base_model, checkpoint_name, is_trainable=True)  # TODO: is there a way to make this error out if it isn't in safetensors format?
     else:
         peft_base_model = peft.get_peft_model(base_model, peft.LoraConfig(
-            # by default, this adds LoRA adapters around LLaMa's "q_proj" and "v_proj", see https://github.com/huggingface/peft/blob/5a0e19dda1048ff8caaa12970ba7574f9cdfbf76/src/peft/utils/other.py#L280 for more details
+            # by default, this adds LoRA adapters around Llama2's "q_proj" and "v_proj", see https://github.com/huggingface/peft/blob/5a0e19dda1048ff8caaa12970ba7574f9cdfbf76/src/peft/utils/other.py#L280 for more details
+            # some other models add more adapters, such as Guanaco, which does it on every linear layer except the head (https://github.com/artidoro/qlora/blob/845188de110d8eb7c95cc8907b54d8cb2e7c01bd/qlora.py#L221), but this doesn't seem to have too noticeable a benefit compared to models that just use these default settings, like Airoboros does (https://github.com/jondurbin/FastChat/blob/5bd738586ae6a495bd73152d74969465f30d43ac/fastchat/train/train_lora.py#L51)
             r=128,  # number of LoRA attention dimension parameters - directly proportional to LoRA adapter VRAM usage, set this to the largest value your hardware can support without running out of memory
             lora_alpha=16,  # alpha parameter for LoRA, essentially scales all of the LoRA weights, which determines "how much of an effect" this LoRA has on the final model
             lora_dropout=0.05,  # dropout probability for LoRA layers
             task_type=peft.TaskType.CAUSAL_LM,
-            # TODO: should we target more lora modules with target_modules=[...]? Guanaco does it on every linear layer (except the head): https://github.com/artidoro/qlora/blob/845188de110d8eb7c95cc8907b54d8cb2e7c01bd/qlora.py#L221
         ))
     peft_base_model.print_trainable_parameters()
     torch.cuda.empty_cache()  # helps reduce VRAM usage - it's right after the PEFT version of the model was created, so some old stuff is still around unnecessarily
@@ -88,17 +88,15 @@ def run_training(train_dataset, test_dataset, tokenizer, resume_from_checkpoint)
             gradient_checkpointing=True,  # use gradient checkpointing to decrease VRAM usage
             bf16=True,  # use 16-bit bfloats for training instead of 32-bit floats in most operations (some are still kept in 32-bit for precision) to decrease VRAM usage and increase training performance, in practice the precision loss has a relatively small effect on the final result
             tf32=True,  # in newer NVIDIA hardware, this replaces the remaining 32-bit operations with a 19-bit TensorFloat operations to increase training performance, in practice the precision loss has no noticeable effect on the final result
-            run_name="llama-direct-preference-finetuning",
-            # TODO: when Apex becomes more stable + easier to install, look into using adamw_apex_fused rather than adamw_hf for the optim= parameter as well as for the optimizer settings on the DPOTrainer, is the optim= setting even used here?
+            run_name="llama2-direct-preference-finetuning",
+            # TODO: when Apex becomes more stable + easier to install, look into using adamw_apex_fused rather than adamw_hf for the optim= parameter (note that some code uses optimizers= on the DPOTrainer itself, which overrides the optim= parameter on TrainingArguments, see https://github.com/huggingface/transformers/blob/53e1f5cf66d320b9c809f3940c707b6fef435d2d/src/transformers/trainer.py#L1084)
         ),
         beta=0.1,  # parameter controlling the deviation from the reference model, higher values prevent the model from deviating too far from the reference model, 0.1 is a relatively low value so the model will change quite a bit
         train_dataset=train_dataset,
         eval_dataset=test_dataset,
         tokenizer=tokenizer,
-        label_pad_token_id=-100,  # TODO: explain what this means
-        padding_value=0,  # TODO: explain what this means
-        max_length=512,  # TODO: explain what this means
-        max_prompt_length=128,  # TODO: explain what this means
+        max_length=CONTEXT_WINDOW_SIZE,  # any inputs that are longer than this value get truncated - first by cutting off the start of the prompt, then by cutting off the end of the response
+        max_prompt_length=CONTEXT_WINDOW_SIZE // 2,  # when truncating by cutting off the start of the prompt, cut it down to half the context window size
     )
 
     os.makedirs(OUTPUT_DIRECTORY, exist_ok=True)

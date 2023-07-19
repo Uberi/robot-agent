@@ -1,6 +1,6 @@
-git+https://github.com/huggingface/transformers.git@2ab75add4b30c2fc44a8bf575156d448d9ed87a7
+git+https://github.com/huggingface/transformers.git@a982c0225efe3af4700f09d09890b239f551870c
 git+https://github.com/huggingface/peft.git@029f416fced285fe72acd4e1be6c48067f7013d5
-git+https://github.com/lvwerra/trl.git@84393f3b94b452adb71d28f42d52c10f0023a834
+git+https://github.com/lvwerra/trl.git@7f297b38c665e6d2357dfd5ba552ef685afe1302
 
 # extra libraries whose presence changes the functionality of the above libraries
 safetensors==0.3.1

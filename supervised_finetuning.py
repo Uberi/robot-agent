@@ -13,9 +13,9 @@ import transformers
 import trl.trainer.utils
 
 
-DATA_JSON_PATH = "./huggingface_cache/datasets--c-s-ale--alpaca-gpt4-data/snapshots/88ef836e16a1d6c0658490cc521184c269c46449/data/alpaca_gpt4_data.json"  # downloaded by running `make download-datasets-and-models` in this repo
-BASE_MODEL_PATH = "./huggingface_cache/models--huggyllama--llama-13b/snapshots/bf57045473f207bb1de1ed035ace226f4d9f9bba/"  # downloaded by running `make download-datasets-and-models` in this repo
-OUTPUT_DIRECTORY = "./llama-supervised-finetuning-output"
+DATA_JSON_PATH = "./huggingface_cache/datasets--jondurbin--airoboros-gpt4-1.4.1/snapshots/433c04038d724bf29a193bc3c1a48b600cc417a1/instructions.jsonl"  # downloaded by running `make download-datasets-and-models` in this repo
+BASE_MODEL_PATH = "./huggingface_cache/models--NousResearch--Llama-2-13b-hf/snapshots/81da3af9503579bf991e3995564baa683b27d38c/"  # downloaded by running `make download-datasets-and-models` in this repo
+OUTPUT_DIRECTORY = "./llama2-supervised-finetuning-output"
 RANDOMNESS_SEED = 0
 BATCH_SIZE = 1  # number of samples seen per gradient update - to increase training speed, set this to the largest size that your hardware can support without running out of memory
 CONTEXT_WINDOW_SIZE = 2048  # size of individual dataset entries used when training the model - to improve performance on longer prompts, set this to the largest size that your hardware can support without running out of memory
@@ -23,15 +23,13 @@ TRAINING_STEPS = 4500  # number of steps to train for (since we're using gradien
 
 
 def prompt_formatter(example):
-    if example["input"]:
-        return f'Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.\n\n### Instruction:\n{example["instruction"]}\n\n### Input:\n{example["input"]}\n\n### Response:\n{example["output"]}'
-    return f'Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n### Instruction:\n{example["instruction"]}\n\n### Response:\n{example["output"]}'
+    return f'\n\n### Human:\n{example["instruction"]}\n\n### Assistant:\n{example["response"]}'
 
 
 def create_datasets(tokenizer):
     # generate train/test split with 0.5% test
     with open(DATA_JSON_PATH) as f:
-        dataset = json.load(f)
+        dataset = [prompt_formatter(json.loads(line)) for line in f]
     random.shuffle(dataset)
     test_dataset_size = round(len(dataset) * 0.005)
     train_dataset, test_dataset = dataset[test_dataset_size:], dataset[:test_dataset_size]
@@ -40,9 +38,8 @@ def create_datasets(tokenizer):
     # estimate the average number of characters per token in the dataset using 400 samples
     total_characters, total_tokens = 0, 0
     for _, example in zip(range(400), train_dataset):
-        text = prompt_formatter(example)
-        total_characters += len(text)
-        total_tokens += len(tokenizer(text).tokens())
+        total_characters += len(example)
+        total_tokens += len(tokenizer(example).tokens())
     estimated_chars_per_token = total_characters / total_tokens
     print(f"dataset character to token ratio: {estimated_chars_per_token}")
 
@@ -50,14 +47,14 @@ def create_datasets(tokenizer):
     train_dataset_packed = trl.trainer.utils.ConstantLengthDataset(
         tokenizer,
         train_dataset,
-        formatting_func=prompt_formatter,
+        formatting_func=lambda x: x,
         seq_length=CONTEXT_WINDOW_SIZE,
         chars_per_token=estimated_chars_per_token,
     )
     test_dataset_packed = trl.trainer.utils.ConstantLengthDataset(
         tokenizer,
         test_dataset,
-        formatting_func=prompt_formatter,
+        formatting_func=lambda x: x,
         seq_length=CONTEXT_WINDOW_SIZE,
         chars_per_token=estimated_chars_per_token,
     )
@@ -75,12 +72,12 @@ def run_training(train_dataset: torch.utils.data.IterableDataset, test_dataset: 
         peft_base_model = peft.PeftModel.from_pretrained(base_model, checkpoint_name, is_trainable=True)  # TODO: is there a way to make this error out if it isn't in safetensors format?
     else:
         peft_base_model = peft.get_peft_model(base_model, peft.LoraConfig(
-            # by default, this adds LoRA adapters around LLaMa's "q_proj" and "v_proj", see https://github.com/huggingface/peft/blob/5a0e19dda1048ff8caaa12970ba7574f9cdfbf76/src/peft/utils/other.py#L280 for more details
+            # by default, this adds LoRA adapters around Llama2's "q_proj" and "v_proj", see https://github.com/huggingface/peft/blob/5a0e19dda1048ff8caaa12970ba7574f9cdfbf76/src/peft/utils/other.py#L280 for more details
+            # some other models add more adapters, such as Guanaco, which does it on every linear layer except the head (https://github.com/artidoro/qlora/blob/845188de110d8eb7c95cc8907b54d8cb2e7c01bd/qlora.py#L221), but this doesn't seem to have too noticeable a benefit compared to models that just use these default settings, like Airoboros does (https://github.com/jondurbin/FastChat/blob/5bd738586ae6a495bd73152d74969465f30d43ac/fastchat/train/train_lora.py#L51)
             r=128,  # number of LoRA attention dimension parameters - directly proportional to LoRA adapter VRAM usage, set this to the largest value your hardware can support without running out of memory
             lora_alpha=16,  # alpha parameter for LoRA, essentially scales all of the LoRA weights, which determines "how much of an effect" this LoRA has on the final model
             lora_dropout=0.05,  # dropout probability for LoRA layers
             task_type=peft.TaskType.CAUSAL_LM,
-            # TODO: should we target more lora modules with target_modules=[...]? Guanaco does it on every linear layer (except the head): https://github.com/artidoro/qlora/blob/845188de110d8eb7c95cc8907b54d8cb2e7c01bd/qlora.py#L221
         ))
     peft_base_model.print_trainable_parameters()
     torch.cuda.empty_cache()  # helps reduce VRAM usage - it's right after the PEFT version of the model was created, so some old stuff is still around unnecessarily
@@ -102,7 +99,7 @@ def run_training(train_dataset: torch.utils.data.IterableDataset, test_dataset: 
             bf16=True,  # use 16-bit bfloats for training instead of 32-bit floats in most operations (some are still kept in 32-bit for precision) to decrease VRAM usage and increase training performance, in practice the precision loss has a relatively small effect on the final result
             tf32=True,  # in newer NVIDIA hardware, this replaces the remaining 32-bit operations with a 19-bit TensorFloat operations to increase training performance, in practice the precision loss has no noticeable effect on the final result
             weight_decay=0.05,  # set the weight decay regularization factor of the optimizer
-            run_name="llama-supervised-finetuning",
+            run_name="llama2-supervised-finetuning",
             # TODO: when Apex becomes more stable + easier to install, look into using adamw_apex_fused rather than adamw_hf for the optim= parameter
         ),
         train_dataset=train_dataset,

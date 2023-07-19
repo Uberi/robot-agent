@@ -11,14 +11,13 @@ import transformers
 
 def merge_lora_back_into_base_model(lora_path, base_model_path, output_path):
     peft_config = peft.PeftConfig.from_pretrained(lora_path)
-    if peft_config.task_type == peft.TaskType.SEQ_CLS:
-        base_model = transformers.AutoModelForSequenceClassification.from_pretrained(base_model_path, num_labels=1, use_safetensors=True)
-    elif peft.TaskType.CAUSAL_LM:
-        base_model = transformers.AutoModelForCausalLM.from_pretrained(base_model_path, return_dict=True, use_safetensors=True)
+    assert peft_config.task_type == peft.TaskType.CAUSAL_LM, peft_config.task_type
+    base_model = transformers.AutoModelForCausalLM.from_pretrained(base_model_path, torch_dtype=torch.float16, return_dict=True, use_safetensors=True)
     peft_base_model = peft.PeftModel.from_pretrained(base_model, lora_path)
     peft_base_model.eval()  # switch the model over into inference mode, disabling training-specific functionality such as dropout layers
     merged_model = peft_base_model.merge_and_unload()
-    merged_model.save_pretrained(output_path)
+    del merged_model.config._name_or_path  # remove path metadata from the model config
+    merged_model.save_pretrained(output_path, safe_serialization=True)
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(base_model_path)
     tokenizer.save_pretrained(output_path)
