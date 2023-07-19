@@ -21,6 +21,15 @@ train-direct-preference-finetuning: llama2-direct-preference-finetuning-output/f
 chat: train-direct-preference-finetuning
 	. ./venv/bin/activate && python3 chat.py
 
+.PHONY: generate-ggml
+generate-ggml: train-direct-preference-finetuning
+	# TODO: download llama.cpp and build it
+	mkdir -p exported-models
+	. ./venv/bin/activate && cd llama.cpp && python3 convert.py --outfile ../exported-models/ggml-robot-agent-f16.bin ../llama2-direct-preference-finetuning-output/final_checkpoint_merged && ./quantize ../exported-models/ggml-robot-agent-f16.bin ../exported-models/ggml-robot-agent-q5_K_M.bin q5_K_M
+
+llama-cpp-chat:
+	cd llama.cpp && ./main --model ../exported-models/ggml-robot-agent-q5_K_M.bin --color -i --interactive-first --mirostat 2 --ctx-size 2048 -r $$'\n\n### Human:\n' --in-prefix $$'\n\n### Human:\n' --in-suffix $$'\n\n### Assistant:\n' -n -1
+
 ####################
 # internal targets #
 ####################
