@@ -24,6 +24,16 @@ Technical details:
     * This replaces the reward modelling and reinforcement learning steps in a standard RLHF pipeline.
 * Codebase takes ideas and inspiration from [StackLLaMa](https://github.com/lvwerra/trl/tree/5c7bfbc8d9aeabee893290cc02121d7260636978/examples/research_projects/stack_llama/scripts), [QLoRA](https://github.com/artidoro/qlora), [LLaMA-TRL](https://github.com/jasonvanf/llama-trl), [Airoboros](https://github.com/jondurbin/airoboros), .
 
+Roadmap
+-------
+
+* [x] Full reproducible environment with all datasets, base models, and dependencies included.
+* [x] Supervised finetuning script using high-quality publically-available instruct datasets.
+* [x] Human-preference finetuning script based on Anthropic's hh-rlhf "helpfulness" dataset.
+* [x] Accidentally delete the training results on my GPU server and start the training over again from scratch.
+* [ ] Fiddle with agentic dataset generation using Charades dataset.
+* [ ] If that doesn't work, fiddle with video captioning using multimodal models like Otter to generate agentic captions from how-to videos on Youtube.
+
 Prompt Format
 -------------
 

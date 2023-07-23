@@ -1,14 +1,14 @@
 # NOTE: the Makefile also has a special pip install command for PyTorch under the `venv/requirements_installed` target, which can't be put in this file because it uses a different Python package index
 
-git+https://github.com/huggingface/transformers.git@6112b1c6442aaf7affd2b0676a1cd4eee30c45cf
+git+https://github.com/huggingface/transformers.git@b257c46a075419c09e5ce5c5aa39bc346ecdb9a5
 git+https://github.com/huggingface/peft.git@e06d94ddeb6c70913593740618df76908b918d66
-git+https://github.com/lvwerra/trl.git@d0fe348a0a354bb10e0d728d8e9a4d46d4df0cbc
+git+https://github.com/lvwerra/trl.git@170d58ffcede84b3bc822294317fc2bb6df85865
 
 # extra libraries whose presence changes the functionality of the above libraries
 safetensors==0.3.1
-bitsandbytes==0.40.0.post4
+bitsandbytes==0.41.0
 
-# transitive dependencies that the above libraries don't specify properly
+# transitive dependencies that the above libraries don't specify properly but are necessary anyways
 einops==0.6.1
 scipy==1.11.1
 sentencepiece==0.1.99

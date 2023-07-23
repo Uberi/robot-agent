@@ -21,7 +21,7 @@ BASE_MODEL_PATH = "./llama2-supervised-finetuning-output/final_checkpoint_merged
 OUTPUT_DIRECTORY = "./llama2-direct-preference-finetuning-output"
 RANDOMNESS_SEED = 0
 BATCH_SIZE = 1  # number of samples seen per gradient update - to increase training speed, set this to the largest size that your hardware can support without running out of memory
-CONTEXT_WINDOW_SIZE = 1536  # maximum length of any input to the model, used to filter out too-long data points (this doesn't have to be the same value as in supervised_finetuning.py) - to improve performance on longer prompts, set this to the largest size that your hardware can support without running out of memory
+CONTEXT_WINDOW_SIZE = 1300  # maximum length of any input to the model, used to filter out too-long data points (this doesn't have to be the same value as in supervised_finetuning.py) - to improve performance on longer prompts, set this to the largest size that your hardware can support without running out of memory
 TRAINING_STEPS = 1000  # number of steps to train for (since we're using gradient_accumulation_steps=4, the model will see TRAINING_STEPS * 4 * BATCH_SIZE samples throughout the entire training run)
 
 
@@ -39,8 +39,7 @@ def prompt_formatter(example):
         prompt, chosen, rejected = chosen_messages[i + 1], chosen_messages[i + 3], rejected_messages[i + 3]
         chosen_prompt_so_far += f'\n\n### Human:\n{prompt}\n\n### Assistant:\n'
         result.append({"prompt": chosen_prompt_so_far, "chosen": chosen, "rejected": rejected})
-        chosen_prompt_so_far += chosen_messages[i + 1]
-    assert not human_is_speaking, example
+        chosen_prompt_so_far += chosen_messages[i + 3]
     return result
 
 
@@ -88,6 +87,7 @@ def run_training(train_dataset, test_dataset, tokenizer, resume_from_checkpoint)
             gradient_checkpointing=True,  # use gradient checkpointing to decrease VRAM usage
             bf16=True,  # use 16-bit bfloats for training instead of 32-bit floats in most operations (some are still kept in 32-bit for precision) to decrease VRAM usage and increase training performance, in practice the precision loss has a relatively small effect on the final result
             tf32=True,  # in newer NVIDIA hardware, this replaces the remaining 32-bit operations with a 19-bit TensorFloat operations to increase training performance, in practice the precision loss has no noticeable effect on the final result
+            remove_unused_columns=False,  # the DPO default data collator requires this setting, since it customizes the model training/prediction steps
             run_name="llama2-direct-preference-finetuning",
             # TODO: when Apex becomes more stable + easier to install, look into using adamw_apex_fused rather than adamw_hf for the optim= parameter (note that some code uses optimizers= on the DPOTrainer itself, which overrides the optim= parameter on TrainingArguments, see https://github.com/huggingface/transformers/blob/53e1f5cf66d320b9c809f3940c707b6fef435d2d/src/transformers/trainer.py#L1084)
         ),

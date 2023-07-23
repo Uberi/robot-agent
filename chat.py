@@ -21,6 +21,7 @@ if __name__ == "__main__":
     stopping_criteria = transformers.StoppingCriteriaList([lambda input_ids, scores: tokenizer.decode(input_ids[0]).endswith("\n\n### Human:")])
 
     prompt_so_far = ""
+    print("enter your prompt below, ending with an EOF character (Enter, Ctrl+D, Enter on most terminals)")
     print("### Human:")
     while True:
         prompt = []
@@ -38,10 +39,11 @@ if __name__ == "__main__":
             input_ids=tokenized_prompt.input_ids,
             attention_mask=tokenized_prompt.attention_mask,
             generation_config=transformers.GenerationConfig(
-                max_new_tokens=CONTEXT_WINDOW_SIZE,
+                max_new_tokens=CONTEXT_WINDOW_SIZE,  # generate up to an entire context window's worth of new output
                 pad_token_id=tokenizer.eos_token_id,
                 eos_token_id=tokenizer.eos_token_id,
-                penalty_alpha=0.6, top_k=4,  # contrastive search, gives more coherent but non-repetitive outputs
+                penalty_alpha=0.6, top_k=4,  # contrastive search sampling, gives more coherent but non-repetitive outputs - the alpha penalty determines how much to penalize the score of each next token being "similar" to the existing tokens in the context (so when alpha=0, there's no penalty and it just becomes greedy sampling), and the top-k parameter is the number of top candidates to consider after computing this score
+                low_memory=True,  # use a more memory-efficient but slower sampling method, sequentially instead of in parallel
             ),
             stopping_criteria=stopping_criteria,
         )[0]
